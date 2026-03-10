@@ -207,7 +207,18 @@ if ($action === 'listNotes' && $method === 'GET') {
         ':user_id_view' => $userId,
         ':user_id_owner' => $userId,
         ':user_id_shared' => $userId,
+        ':limit' => $limit,
+        ':offset' => $offset,
     ];
+
+    if ($scope === 'mine') {
+        $sql .= ' AND n.owner_id = :scope_owner_id';
+        $params[':scope_owner_id'] = $userId;
+    } elseif ($scope === 'shared') {
+        $sql .= ' AND n.owner_id <> :scope_not_owner_id AND s.shared_with_user_id = :scope_shared_user_id';
+        $params[':scope_not_owner_id'] = $userId;
+        $params[':scope_shared_user_id'] = $userId;
+    }
 
     if ($q !== '') {
         $sql .= ' AND (n.title LIKE :query_title OR n.content LIKE :query_content OR u.username LIKE :query_owner)';
@@ -221,7 +232,16 @@ if ($action === 'listNotes' && $method === 'GET') {
 
     $stmt = $pdo->prepare($sql);
     foreach ($params as $key => $value) {
-        if (in_array($key, [':offset', ':limit', ':user_id_view', ':user_id_owner', ':user_id_shared'], true)) {
+        if (in_array($key, [
+            ':offset',
+            ':limit',
+            ':user_id_view',
+            ':user_id_owner',
+            ':user_id_shared',
+            ':scope_owner_id',
+            ':scope_not_owner_id',
+            ':scope_shared_user_id',
+        ], true)) {
             $stmt->bindValue($key, (int) $value, PDO::PARAM_INT);
         } else {
             $stmt->bindValue($key, (string) $value, PDO::PARAM_STR);
