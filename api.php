@@ -10,6 +10,16 @@ session_start();
 
 header('Content-Type: application/json; charset=utf-8');
 
+set_exception_handler(static function (Throwable $exception): void {
+    http_response_code(500);
+    echo json_encode([
+        'ok' => false,
+        'error' => 'Внутренняя ошибка сервера. Проверьте настройки БД и структуру таблиц.',
+        'details' => $exception->getMessage(),
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+});
+
 function respond(array $payload, int $status = 200): void
 {
     http_response_code($status);
@@ -61,15 +71,15 @@ function getNoteForUser(PDO $pdo, int $noteId, int $userId): ?array
     $sql = "
         SELECT n.id, n.owner_id, n.title, n.content, n.updated_at,
                u.username AS owner_name,
-               (n.owner_id = :user_id) AS is_owner
+               (n.owner_id = :user_id_view) AS is_owner
         FROM notes n
         JOIN users u ON u.id = n.owner_id
         WHERE n.id = :note_id
           AND (
-              n.owner_id = :user_id
+              n.owner_id = :user_id_owner
               OR EXISTS (
                   SELECT 1 FROM note_shares s
-                  WHERE s.note_id = n.id AND s.shared_with_user_id = :user_id
+                  WHERE s.note_id = n.id AND s.shared_with_user_id = :user_id_shared
               )
           )
     ";
@@ -77,7 +87,9 @@ function getNoteForUser(PDO $pdo, int $noteId, int $userId): ?array
     $stmt = $pdo->prepare($sql);
     $stmt->execute([
         ':note_id' => $noteId,
-        ':user_id' => $userId,
+        ':user_id_view' => $userId,
+        ':user_id_owner' => $userId,
+        ':user_id_shared' => $userId,
     ]);
 
     $note = $stmt->fetch();
@@ -176,18 +188,25 @@ if ($action === 'listNotes' && $method === 'GET') {
     $sql = "
         SELECT DISTINCT n.id, n.title, n.content, n.updated_at,
                u.username AS owner_name,
-               (n.owner_id = :user_id) AS is_owner
+               (n.owner_id = :user_id_view) AS is_owner
         FROM notes n
         JOIN users u ON u.id = n.owner_id
         LEFT JOIN note_shares s ON s.note_id = n.id
-        WHERE (n.owner_id = :user_id OR s.shared_with_user_id = :user_id)
+        WHERE (n.owner_id = :user_id_owner OR s.shared_with_user_id = :user_id_shared)
     ";
 
-    $params = [':user_id' => $userId];
+    $params = [
+        ':user_id_view' => $userId,
+        ':user_id_owner' => $userId,
+        ':user_id_shared' => $userId,
+    ];
 
     if ($q !== '') {
-        $sql .= ' AND (n.title LIKE :query OR n.content LIKE :query OR u.username LIKE :query)';
-        $params[':query'] = '%' . $q . '%';
+        $sql .= ' AND (n.title LIKE :query_title OR n.content LIKE :query_content OR u.username LIKE :query_owner)';
+        $searchLike = '%' . $q . '%';
+        $params[':query_title'] = $searchLike;
+        $params[':query_content'] = $searchLike;
+        $params[':query_owner'] = $searchLike;
     }
 
     $sql .= ' ORDER BY n.updated_at DESC LIMIT 200';
@@ -229,8 +248,8 @@ if ($action === 'updateNote' && $method === 'POST') {
     }
 
     $note = getNoteForUser($pdo, $noteId, $userId);
-    if (!$note || !(bool) $note['is_owner']) {
-        respond(['ok' => false, 'error' => 'Можно редактировать только свои заметки.'], 403);
+    if (!$note) {
+        respond(['ok' => false, 'error' => 'Заметка не найдена или доступ запрещён.'], 403);
     }
 
     $stmt = $pdo->prepare('UPDATE notes SET title = :title, content = :content WHERE id = :id');

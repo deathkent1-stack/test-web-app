@@ -55,7 +55,18 @@ async function api(action, options = {}) {
         body: options.body ? JSON.stringify(options.body) : undefined,
     });
 
-    const data = await res.json();
+    const rawText = await res.text();
+    let data;
+
+    try {
+        data = rawText ? JSON.parse(rawText) : null;
+    } catch {
+        throw new Error('Сервер вернул некорректный ответ. Проверьте API и настройки БД.');
+    }
+
+    if (!data || typeof data !== 'object') {
+        throw new Error('Сервер вернул пустой ответ. Проверьте логи PHP и БД.');
+    }
 
     if (!res.ok || data.ok === false) {
         throw new Error(data.error || 'Ошибка запроса');
@@ -113,9 +124,9 @@ function selectNote(noteId) {
     el.noteContent.value = note.content;
 
     const isOwner = Number(note.is_owner) === 1;
-    el.editorTitle.textContent = isOwner ? 'Редактирование заметки' : 'Просмотр заметки (только чтение)';
-    el.noteTitle.readOnly = !isOwner;
-    el.noteContent.readOnly = !isOwner;
+    el.editorTitle.textContent = isOwner ? 'Редактирование заметки' : 'Совместное редактирование заметки';
+    el.noteTitle.readOnly = false;
+    el.noteContent.readOnly = false;
     el.deleteBtn.disabled = !isOwner;
     el.shareBlock.classList.toggle('hidden', !isOwner);
 
