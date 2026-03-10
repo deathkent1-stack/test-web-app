@@ -4,6 +4,12 @@ const state = {
     user: null,
     notes: [],
     selectedNoteId: null,
+    sharedUsers: [],
+    noteScope: 'all',
+    notesOffset: 0,
+    notesLimit: 20,
+    hasMoreNotes: true,
+    isLoadingNotes: false,
 };
 
 const el = {
@@ -19,6 +25,7 @@ const el = {
     authPassword: document.getElementById('authPassword'),
     authSubmit: document.getElementById('authSubmit'),
     searchInput: document.getElementById('searchInput'),
+    noteScopeFilter: document.getElementById('noteScopeFilter'),
     newNoteBtn: document.getElementById('newNoteBtn'),
     notesList: document.getElementById('notesList'),
     noteForm: document.getElementById('noteForm'),
@@ -28,15 +35,39 @@ const el = {
     deleteBtn: document.getElementById('deleteBtn'),
     shareBlock: document.getElementById('shareBlock'),
     shareUsername: document.getElementById('shareUsername'),
+    shareUserSuggestions: document.getElementById('shareUserSuggestions'),
     shareBtn: document.getElementById('shareBtn'),
+    sharedUsersList: document.getElementById('sharedUsersList'),
     editorTitle: document.getElementById('editorTitle'),
     message: document.getElementById('message'),
 };
 
+let messageTimer = null;
+
+function hideMessage() {
+    if (messageTimer) {
+        clearTimeout(messageTimer);
+        messageTimer = null;
+    }
+
+    el.message.classList.add('hidden');
+}
+
 function showMessage(text, type = 'ok') {
-    el.message.textContent = text;
+    if (messageTimer) {
+        clearTimeout(messageTimer);
+    }
+
+    el.message.innerHTML = `
+        <span>${text}</span>
+        <button type="button" class="message-close" aria-label="Закрыть уведомление">×</button>
+    `;
     el.message.className = `message ${type}`;
-    setTimeout(() => el.message.classList.add('hidden'), 2800);
+
+    const closeBtn = el.message.querySelector('.message-close');
+    closeBtn?.addEventListener('click', hideMessage);
+
+    messageTimer = setTimeout(hideMessage, 10000);
 }
 
 async function api(action, options = {}) {
@@ -75,6 +106,47 @@ async function api(action, options = {}) {
     return data;
 }
 
+function renderSharedUsers() {
+    el.sharedUsersList.innerHTML = '';
+
+    if (!state.sharedUsers.length) {
+        const li = document.createElement('li');
+        li.className = 'empty';
+        li.textContent = 'Пока никому не выдан доступ.';
+        el.sharedUsersList.append(li);
+        return;
+    }
+
+    state.sharedUsers.forEach((username) => {
+        const li = document.createElement('li');
+
+        const name = document.createElement('span');
+        name.textContent = username;
+
+        const revokeBtn = document.createElement('button');
+        revokeBtn.type = 'button';
+        revokeBtn.className = 'danger small revoke-share-btn';
+        revokeBtn.dataset.username = username;
+        revokeBtn.textContent = 'Отозвать';
+
+        li.append(name, revokeBtn);
+        el.sharedUsersList.append(li);
+    });
+}
+
+async function loadSharedUsers(noteId, isOwner) {
+    state.sharedUsers = [];
+
+    if (!isOwner || !noteId) {
+        renderSharedUsers();
+        return;
+    }
+
+    const result = await api('listSharedUsers', { query: { id: noteId } });
+    state.sharedUsers = result.users || [];
+    renderSharedUsers();
+}
+
 function setAuthMode(mode) {
     state.mode = mode;
     const isLogin = mode === 'login';
@@ -110,6 +182,18 @@ function renderNotes() {
         li.onclick = () => selectNote(Number(note.id));
         el.notesList.append(li);
     });
+
+    if (state.isLoadingNotes) {
+        const loading = document.createElement('li');
+        loading.className = 'empty loading-more';
+        loading.textContent = 'Загрузка...';
+        el.notesList.append(loading);
+    } else if (state.hasMoreNotes) {
+        const hint = document.createElement('li');
+        hint.className = 'empty loading-more';
+        hint.textContent = 'Прокрутите вниз, чтобы загрузить ещё.';
+        el.notesList.append(hint);
+    }
 }
 
 function selectNote(noteId) {
@@ -129,6 +213,7 @@ function selectNote(noteId) {
     el.noteContent.readOnly = false;
     el.deleteBtn.disabled = !isOwner;
     el.shareBlock.classList.toggle('hidden', !isOwner);
+    loadSharedUsers(Number(note.id), isOwner).catch((error) => showMessage(error.message, 'error'));
 
     renderNotes();
 }
@@ -142,23 +227,97 @@ function resetEditor() {
     el.noteContent.readOnly = false;
     el.deleteBtn.disabled = true;
     el.shareBlock.classList.add('hidden');
+    state.sharedUsers = [];
+    renderSharedUsers();
     renderNotes();
 }
 
-async function loadNotes() {
-    const q = el.searchInput.value.trim();
-    const data = await api('listNotes', { query: { q } });
-    state.notes = data.notes || [];
+async function loadNotes(reset = false) {
+    if (state.isLoadingNotes) {
+        return;
+    }
 
+    if (reset) {
+        state.notesOffset = 0;
+        state.hasMoreNotes = true;
+    }
+
+    if (!state.hasMoreNotes) {
+        return;
+    }
+
+    state.isLoadingNotes = true;
     renderNotes();
 
-    if (state.selectedNoteId) {
-        const exists = state.notes.some((item) => Number(item.id) === state.selectedNoteId);
-        if (exists) {
-            selectNote(state.selectedNoteId);
+    const q = el.searchInput.value.trim();
+
+    try {
+        const data = await api('listNotes', {
+            query: {
+                q,
+                scope: state.noteScope,
+                offset: state.notesOffset,
+                limit: state.notesLimit,
+            },
+        });
+
+        const nextChunk = data.notes || [];
+
+        if (reset) {
+            state.notes = nextChunk;
         } else {
-            resetEditor();
+            state.notes = [...state.notes, ...nextChunk];
         }
+
+        state.notesOffset = state.notes.length;
+        state.hasMoreNotes = Boolean(data.hasMore);
+
+        renderNotes();
+
+        if (state.selectedNoteId) {
+            const exists = state.notes.some((item) => Number(item.id) === state.selectedNoteId);
+            if (exists) {
+                selectNote(state.selectedNoteId);
+            } else {
+                resetEditor();
+            }
+        }
+    } finally {
+        state.isLoadingNotes = false;
+        renderNotes();
+    }
+}
+
+function handleNotesScroll() {
+    const threshold = 40;
+    const nearBottom = el.notesList.scrollTop + el.notesList.clientHeight >= el.notesList.scrollHeight - threshold;
+
+    if (nearBottom) {
+        loadNotes().catch((error) => showMessage(error.message, 'error'));
+    }
+}
+
+let shareSearchTimer = null;
+
+async function loadShareSuggestions() {
+    const query = el.shareUsername.value.trim();
+
+    if (query.length < 1) {
+        el.shareUserSuggestions.innerHTML = '';
+        return;
+    }
+
+    try {
+        const result = await api('searchUsers', { query: { q: query } });
+        el.shareUserSuggestions.innerHTML = '';
+
+        (result.users || []).forEach((username) => {
+            const option = document.createElement('option');
+            option.value = username;
+            el.shareUserSuggestions.append(option);
+        });
+    } catch (error) {
+        console.error(error);
     }
 }
 
@@ -170,7 +329,7 @@ async function bootstrap() {
         if (info.authenticated) {
             state.user = info.user;
             switchToApp();
-            await loadNotes();
+            await loadNotes(true);
         } else {
             switchToAuth();
         }
@@ -217,7 +376,7 @@ el.authForm.addEventListener('submit', async (event) => {
         state.csrf = result.csrf;
         switchToApp();
         resetEditor();
-        await loadNotes();
+        await loadNotes(true);
     } catch (error) {
         showMessage(error.message, 'error');
     }
@@ -228,6 +387,8 @@ el.logoutBtn.addEventListener('click', async () => {
         await api('logout', { method: 'POST' });
         state.user = null;
         state.notes = [];
+        state.notesOffset = 0;
+        state.hasMoreNotes = true;
         resetEditor();
         switchToAuth();
         showMessage('Вы вышли из системы.', 'ok');
@@ -240,11 +401,22 @@ el.newNoteBtn.addEventListener('click', resetEditor);
 
 el.searchInput.addEventListener('input', async () => {
     try {
-        await loadNotes();
+        await loadNotes(true);
     } catch (error) {
         showMessage(error.message, 'error');
     }
 });
+
+el.noteScopeFilter.addEventListener('change', async () => {
+    state.noteScope = el.noteScopeFilter.value;
+    try {
+        await loadNotes(true);
+    } catch (error) {
+        showMessage(error.message, 'error');
+    }
+});
+
+el.notesList.addEventListener('scroll', handleNotesScroll);
 
 el.noteForm.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -270,7 +442,7 @@ el.noteForm.addEventListener('submit', async (event) => {
             showMessage('Заметка создана.', 'ok');
         }
 
-        await loadNotes();
+        await loadNotes(true);
     } catch (error) {
         showMessage(error.message, 'error');
     }
@@ -291,11 +463,21 @@ el.deleteBtn.addEventListener('click', async () => {
         await api('deleteNote', { method: 'POST', body: { id } });
         showMessage('Заметка удалена.', 'ok');
         resetEditor();
-        await loadNotes();
+        await loadNotes(true);
     } catch (error) {
         showMessage(error.message, 'error');
     }
 });
+
+el.shareUsername.addEventListener('input', () => {
+    if (shareSearchTimer) {
+        clearTimeout(shareSearchTimer);
+    }
+
+    shareSearchTimer = setTimeout(loadShareSuggestions, 250);
+});
+
+el.shareUsername.addEventListener('focus', loadShareSuggestions);
 
 el.shareBtn.addEventListener('click', async () => {
     const id = Number(el.noteId.value || 0);
@@ -309,7 +491,36 @@ el.shareBtn.addEventListener('click', async () => {
     try {
         await api('shareNote', { method: 'POST', body: { id, username } });
         el.shareUsername.value = '';
+        el.shareUserSuggestions.innerHTML = '';
         showMessage('Доступ успешно выдан.', 'ok');
+        await loadSharedUsers(id, true);
+    } catch (error) {
+        showMessage(error.message, 'error');
+    }
+});
+
+el.sharedUsersList.addEventListener('click', async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !target.classList.contains('revoke-share-btn')) {
+        return;
+    }
+
+    const noteId = Number(el.noteId.value || 0);
+    const username = target.dataset.username || '';
+
+    if (!noteId || !username) {
+        return;
+    }
+
+    if (!window.confirm(`Отозвать доступ для пользователя ${username}?`)) {
+        return;
+    }
+
+    try {
+        await api('revokeShare', { method: 'POST', body: { id: noteId, username } });
+        showMessage('Доступ пользователя отозван.', 'ok');
+        await loadSharedUsers(noteId, true);
+        await loadNotes(true);
     } catch (error) {
         showMessage(error.message, 'error');
     }

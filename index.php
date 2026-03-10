@@ -43,6 +43,11 @@ declare(strict_types=1);
     <section id="notesSection" class="hidden">
         <div class="toolbar card">
             <input type="search" id="searchInput" placeholder="Поиск по заголовку, содержимому или автору...">
+            <select id="noteScopeFilter" aria-label="Фильтр заметок">
+                <option value="all">Все</option>
+                <option value="mine">Мои</option>
+                <option value="shared">Общие</option>
+            </select>
             <button id="newNoteBtn">Новая заметка</button>
         </div>
 
@@ -74,8 +79,13 @@ declare(strict_types=1);
                     <h3>Совместный доступ</h3>
                     <p>Введите логин пользователя, чтобы дать ему доступ на чтение заметки.</p>
                     <div class="share-controls">
-                        <input type="text" id="shareUsername" placeholder="Логин пользователя">
+                        <input type="text" id="shareUsername" placeholder="Логин пользователя" list="shareUserSuggestions" autocomplete="off">
+                        <datalist id="shareUserSuggestions"></datalist>
                         <button id="shareBtn" type="button">Поделиться</button>
+                    </div>
+                    <div class="shared-users">
+                        <h4>Пользователи с доступом</h4>
+                        <ul id="sharedUsersList" class="shared-users-list"></ul>
                     </div>
                 </div>
             </main>
