@@ -10,6 +10,16 @@ session_start();
 
 header('Content-Type: application/json; charset=utf-8');
 
+set_exception_handler(static function (Throwable $exception): void {
+    http_response_code(500);
+    echo json_encode([
+        'ok' => false,
+        'error' => 'Внутренняя ошибка сервера. Проверьте настройки БД и структуру таблиц.',
+        'details' => $exception->getMessage(),
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+});
+
 function respond(array $payload, int $status = 200): void
 {
     http_response_code($status);
@@ -229,8 +239,8 @@ if ($action === 'updateNote' && $method === 'POST') {
     }
 
     $note = getNoteForUser($pdo, $noteId, $userId);
-    if (!$note || !(bool) $note['is_owner']) {
-        respond(['ok' => false, 'error' => 'Можно редактировать только свои заметки.'], 403);
+    if (!$note) {
+        respond(['ok' => false, 'error' => 'Заметка не найдена или доступ запрещён.'], 403);
     }
 
     $stmt = $pdo->prepare('UPDATE notes SET title = :title, content = :content WHERE id = :id');
