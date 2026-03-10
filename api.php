@@ -200,24 +200,14 @@ if ($action === 'listNotes' && $method === 'GET') {
         FROM notes n
         JOIN users u ON u.id = n.owner_id
         LEFT JOIN note_shares s ON s.note_id = n.id
-        WHERE 1 = 1
+        WHERE (n.owner_id = :user_id_owner OR s.shared_with_user_id = :user_id_shared)
     ";
 
     $params = [
         ':user_id_view' => $userId,
         ':user_id_owner' => $userId,
         ':user_id_shared' => $userId,
-        ':offset' => $offset,
-        ':limit' => $limit,
     ];
-
-    if ($scope === 'mine') {
-        $sql .= ' AND n.owner_id = :user_id_owner';
-    } elseif ($scope === 'shared') {
-        $sql .= ' AND s.shared_with_user_id = :user_id_shared AND n.owner_id <> :user_id_owner';
-    } else {
-        $sql .= ' AND (n.owner_id = :user_id_owner OR s.shared_with_user_id = :user_id_shared)';
-    }
 
     if ($q !== '') {
         $sql .= ' AND (n.title LIKE :query_title OR n.content LIKE :query_content OR u.username LIKE :query_owner)';
