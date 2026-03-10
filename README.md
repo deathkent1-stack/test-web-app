@@ -4,8 +4,8 @@
 
 - регистрации и входа пользователей;
 - добавления, редактирования и удаления заметок;
-- совместного доступа к заметкам (чтение);
-- поиска по заметкам;
+- совместного доступа к заметкам (редактирование для пользователей с доступом) и отзыва доступа;
+- поиска и фильтрации заметок (все / мои / общие);
 - AJAX-взаимодействия без перезагрузки страницы;
 - защиты от SQL-инъекций (PDO prepared statements);
 - защиты от CSRF (токены в сессии + заголовок `X-CSRF-Token`).
@@ -42,11 +42,14 @@ php -S 0.0.0.0:8000
 - `POST action=register`
 - `POST action=login`
 - `POST action=logout`
-- `GET action=listNotes&q=...`
+- `GET action=listNotes&q=...&scope=all|mine|shared&offset=0&limit=20`
 - `POST action=createNote`
 - `POST action=updateNote`
 - `POST action=deleteNote`
 - `POST action=shareNote`
+- `POST action=revokeShare`
+- `GET action=listSharedUsers&id=...`
+- `GET action=searchUsers&q=...`
 
 Формат — JSON.
 

@@ -10,6 +10,16 @@ session_start();
 
 header('Content-Type: application/json; charset=utf-8');
 
+set_exception_handler(static function (Throwable $exception): void {
+    http_response_code(500);
+    echo json_encode([
+        'ok' => false,
+        'error' => 'Внутренняя ошибка сервера. Проверьте настройки БД и структуру таблиц.',
+        'details' => $exception->getMessage(),
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+});
+
 function respond(array $payload, int $status = 200): void
 {
     http_response_code($status);
@@ -61,15 +71,15 @@ function getNoteForUser(PDO $pdo, int $noteId, int $userId): ?array
     $sql = "
         SELECT n.id, n.owner_id, n.title, n.content, n.updated_at,
                u.username AS owner_name,
-               (n.owner_id = :user_id) AS is_owner
+               (n.owner_id = :user_id_view) AS is_owner
         FROM notes n
         JOIN users u ON u.id = n.owner_id
         WHERE n.id = :note_id
           AND (
-              n.owner_id = :user_id
+              n.owner_id = :user_id_owner
               OR EXISTS (
                   SELECT 1 FROM note_shares s
-                  WHERE s.note_id = n.id AND s.shared_with_user_id = :user_id
+                  WHERE s.note_id = n.id AND s.shared_with_user_id = :user_id_shared
               )
           )
     ";
@@ -77,7 +87,9 @@ function getNoteForUser(PDO $pdo, int $noteId, int $userId): ?array
     $stmt = $pdo->prepare($sql);
     $stmt->execute([
         ':note_id' => $noteId,
-        ':user_id' => $userId,
+        ':user_id_view' => $userId,
+        ':user_id_owner' => $userId,
+        ':user_id_shared' => $userId,
     ]);
 
     $note = $stmt->fetch();
@@ -166,37 +178,124 @@ if ($action === 'me' && $method === 'GET') {
 
 $userId = requireAuth();
 
-if (in_array($action, ['createNote', 'updateNote', 'deleteNote', 'shareNote'], true)) {
+if (in_array($action, ['createNote', 'updateNote', 'deleteNote', 'shareNote', 'revokeShare'], true)) {
     verifyCsrf($config['app']['csrf_header']);
 }
 
 if ($action === 'listNotes' && $method === 'GET') {
     $q = trim((string) ($_GET['q'] ?? ''));
+    $scope = (string) ($_GET['scope'] ?? 'all');
+    $offset = max(0, (int) ($_GET['offset'] ?? 0));
+    $limit = (int) ($_GET['limit'] ?? 20);
+    $limit = max(1, min($limit, 100));
+
+    if (!in_array($scope, ['all', 'mine', 'shared'], true)) {
+        $scope = 'all';
+    }
 
     $sql = "
         SELECT DISTINCT n.id, n.title, n.content, n.updated_at,
                u.username AS owner_name,
-               (n.owner_id = :user_id) AS is_owner
+               (n.owner_id = :user_id_view) AS is_owner
         FROM notes n
         JOIN users u ON u.id = n.owner_id
         LEFT JOIN note_shares s ON s.note_id = n.id
-        WHERE (n.owner_id = :user_id OR s.shared_with_user_id = :user_id)
+        WHERE 1 = 1
     ";
 
-    $params = [':user_id' => $userId];
+    $params = [
+        ':user_id_view' => $userId,
+        ':user_id_owner' => $userId,
+        ':user_id_shared' => $userId,
+        ':offset' => $offset,
+        ':limit' => $limit,
+    ];
 
-    if ($q !== '') {
-        $sql .= ' AND (n.title LIKE :query OR n.content LIKE :query OR u.username LIKE :query)';
-        $params[':query'] = '%' . $q . '%';
+    if ($scope === 'mine') {
+        $sql .= ' AND n.owner_id = :user_id_owner';
+    } elseif ($scope === 'shared') {
+        $sql .= ' AND s.shared_with_user_id = :user_id_shared AND n.owner_id <> :user_id_owner';
+    } else {
+        $sql .= ' AND (n.owner_id = :user_id_owner OR s.shared_with_user_id = :user_id_shared)';
     }
 
-    $sql .= ' ORDER BY n.updated_at DESC LIMIT 200';
+    if ($q !== '') {
+        $sql .= ' AND (n.title LIKE :query_title OR n.content LIKE :query_content OR u.username LIKE :query_owner)';
+        $searchLike = '%' . $q . '%';
+        $params[':query_title'] = $searchLike;
+        $params[':query_content'] = $searchLike;
+        $params[':query_owner'] = $searchLike;
+    }
+
+    $sql .= ' ORDER BY n.updated_at DESC LIMIT :limit OFFSET :offset';
 
     $stmt = $pdo->prepare($sql);
-    $stmt->execute($params);
+    foreach ($params as $key => $value) {
+        if (in_array($key, [':offset', ':limit', ':user_id_view', ':user_id_owner', ':user_id_shared'], true)) {
+            $stmt->bindValue($key, (int) $value, PDO::PARAM_INT);
+        } else {
+            $stmt->bindValue($key, (string) $value, PDO::PARAM_STR);
+        }
+    }
+    $stmt->execute();
     $notes = $stmt->fetchAll();
 
-    respond(['ok' => true, 'notes' => $notes]);
+    respond([
+        'ok' => true,
+        'notes' => $notes,
+        'hasMore' => count($notes) === $limit,
+    ]);
+}
+
+
+if ($action === 'listSharedUsers' && $method === 'GET') {
+    $noteId = (int) ($_GET['id'] ?? 0);
+
+    if ($noteId <= 0) {
+        respond(['ok' => false, 'error' => 'Некорректный идентификатор заметки.'], 422);
+    }
+
+    $note = getNoteForUser($pdo, $noteId, $userId);
+    if (!$note || !(bool) $note['is_owner']) {
+        respond(['ok' => false, 'error' => 'Список доступа доступен только владельцу заметки.'], 403);
+    }
+
+    $stmt = $pdo->prepare(
+        'SELECT u.username
+         FROM note_shares s
+         JOIN users u ON u.id = s.shared_with_user_id
+         WHERE s.note_id = :note_id
+         ORDER BY u.username ASC'
+    );
+    $stmt->execute([':note_id' => $noteId]);
+
+    $users = array_map(static fn (array $row): string => (string) $row['username'], $stmt->fetchAll());
+
+    respond(['ok' => true, 'users' => $users]);
+}
+
+if ($action === 'searchUsers' && $method === 'GET') {
+    $q = trim((string) ($_GET['q'] ?? ''));
+
+    if ($q === '') {
+        respond(['ok' => true, 'users' => []]);
+    }
+
+    $stmt = $pdo->prepare(
+        'SELECT username
+         FROM users
+         WHERE username LIKE :query AND id <> :current_user_id
+         ORDER BY username ASC
+         LIMIT 10'
+    );
+    $stmt->execute([
+        ':query' => $q . '%',
+        ':current_user_id' => $userId,
+    ]);
+
+    $users = array_map(static fn (array $row): string => (string) $row['username'], $stmt->fetchAll());
+
+    respond(['ok' => true, 'users' => $users]);
 }
 
 if ($action === 'createNote' && $method === 'POST') {
@@ -229,8 +328,8 @@ if ($action === 'updateNote' && $method === 'POST') {
     }
 
     $note = getNoteForUser($pdo, $noteId, $userId);
-    if (!$note || !(bool) $note['is_owner']) {
-        respond(['ok' => false, 'error' => 'Можно редактировать только свои заметки.'], 403);
+    if (!$note) {
+        respond(['ok' => false, 'error' => 'Заметка не найдена или доступ запрещён.'], 403);
     }
 
     $stmt = $pdo->prepare('UPDATE notes SET title = :title, content = :content WHERE id = :id');
@@ -299,6 +398,44 @@ if ($action === 'shareNote' && $method === 'POST') {
     ]);
 
     respond(['ok' => true, 'message' => 'Доступ выдан.']);
+}
+
+if ($action === 'revokeShare' && $method === 'POST') {
+    $data = requestData();
+    $noteId = (int) ($data['id'] ?? 0);
+    $username = trim((string) ($data['username'] ?? ''));
+
+    if ($noteId <= 0 || $username === '') {
+        respond(['ok' => false, 'error' => 'Укажите заметку и логин пользователя для отзыва доступа.'], 422);
+    }
+
+    $note = getNoteForUser($pdo, $noteId, $userId);
+    if (!$note || !(bool) $note['is_owner']) {
+        respond(['ok' => false, 'error' => 'Вы можете отзывать доступ только к своим заметкам.'], 403);
+    }
+
+    $userStmt = $pdo->prepare('SELECT id FROM users WHERE username = :username');
+    $userStmt->execute([':username' => $username]);
+    $targetUser = $userStmt->fetch();
+
+    if (!$targetUser) {
+        respond(['ok' => false, 'error' => 'Пользователь не найден.'], 404);
+    }
+
+    $revokeStmt = $pdo->prepare(
+        'DELETE FROM note_shares
+         WHERE note_id = :note_id AND shared_with_user_id = :shared_with_user_id'
+    );
+    $revokeStmt->execute([
+        ':note_id' => $noteId,
+        ':shared_with_user_id' => (int) $targetUser['id'],
+    ]);
+
+    if ($revokeStmt->rowCount() === 0) {
+        respond(['ok' => false, 'error' => 'У пользователя нет доступа к этой заметке.'], 404);
+    }
+
+    respond(['ok' => true, 'message' => 'Доступ отозван.']);
 }
 
 respond(['ok' => false, 'error' => 'Маршрут не найден.'], 404);
